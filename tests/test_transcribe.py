@@ -4,6 +4,7 @@ import os
 import numpy as np
 
 from faster_whisper import BatchedInferencePipeline, WhisperModel, decode_audio
+from faster_whisper.transcribe import TranscriptionOptions
 
 
 def test_supported_languages():
@@ -232,6 +233,92 @@ def test_hotwords(data_dir):
 
     assert "ComfyUI" in segments[0].text
     assert info.transcription_options.hotwords == "ComfyUI"
+
+
+def test_batched_initial_prompt_only_on_first_chunk_with_hotwords_on_all_chunks():
+    class FakeTokenizer:
+        def encode(self, text):
+            assert text == " Glossary"
+            return [42]
+
+    class FakeModel:
+        max_length = 16
+
+        def __init__(self):
+            self.prompt_calls = []
+            self.model = self
+
+        def get_prompt(
+            self,
+            tokenizer,
+            previous_tokens,
+            without_timestamps=False,
+            prefix=None,
+            hotwords=None,
+        ):
+            self.prompt_calls.append((previous_tokens, hotwords))
+            prompt = [1] + previous_tokens
+            if hotwords is not None:
+                prompt.append(99)
+            return prompt
+
+        def encode(self, features):
+            return features
+
+        def generate(self, encoder_output, prompts, **kwargs):
+            self.prompts = prompts
+            self.max_length_arg = kwargs["max_length"]
+
+            class Result:
+                sequences_ids = [[7]]
+                scores = [-1.0]
+                no_speech_prob = 0.0
+
+            return [Result() for _ in prompts]
+
+    options = TranscriptionOptions(
+        beam_size=5,
+        best_of=5,
+        patience=1,
+        length_penalty=1,
+        repetition_penalty=1,
+        no_repeat_ngram_size=0,
+        log_prob_threshold=None,
+        no_speech_threshold=None,
+        compression_ratio_threshold=None,
+        condition_on_previous_text=False,
+        prompt_reset_on_temperature=0.5,
+        temperatures=[0],
+        initial_prompt="Glossary",
+        prefix=None,
+        suppress_blank=True,
+        suppress_tokens=[],
+        without_timestamps=False,
+        max_initial_timestamp=0,
+        word_timestamps=False,
+        prepend_punctuations="",
+        append_punctuations="",
+        multilingual=False,
+        max_new_tokens=4,
+        clip_timestamps="0",
+        hallucination_silence_threshold=None,
+        hotwords="ComfyUI",
+    )
+
+    model = FakeModel()
+    pipeline = BatchedInferencePipeline(model)
+
+    pipeline.generate_segment_batched(
+        np.zeros((2, 80, 3000), dtype=np.float32),
+        FakeTokenizer(),
+        [{"offset": 12}, {"offset": 30}],
+        options,
+        prompt_for_first_chunk=True,
+    )
+
+    assert model.prompt_calls == [([], "ComfyUI"), ([42], "ComfyUI")]
+    assert model.prompts == [[1, 42, 99], [1, 99]]
+    assert model.max_length_arg == 7
 
 
 def test_transcribe_signature():

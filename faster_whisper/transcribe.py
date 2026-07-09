@@ -116,9 +116,16 @@ class BatchedInferencePipeline:
         self.model: WhisperModel = model
         self.last_speech_timestamp = 0.0
 
-    def forward(self, features, tokenizer, chunks_metadata, options):
+    def forward(
+        self,
+        features,
+        tokenizer,
+        chunks_metadata,
+        options,
+        prompt_for_first_chunk=False,
+    ):
         encoder_output, outputs = self.generate_segment_batched(
-            features, tokenizer, options
+            features, tokenizer, chunks_metadata, options, prompt_for_first_chunk
         )
 
         segmented_outputs = []
@@ -175,49 +182,69 @@ class BatchedInferencePipeline:
         self,
         features: np.ndarray,
         tokenizer: Tokenizer,
-        options: TranscriptionOptions,
+        chunks_metadata: Union[List[dict], TranscriptionOptions],
+        options: Optional[TranscriptionOptions] = None,
+        prompt_for_first_chunk: bool = False,
     ):
         batch_size = features.shape[0]
 
-        prompt = self.model.get_prompt(
+        if options is None:
+            options = chunks_metadata
+            chunks_metadata = [{} for _ in range(batch_size)]
+            prompt_for_first_chunk = True
+
+        default_prompt = self.model.get_prompt(
             tokenizer,
-            previous_tokens=(
-                tokenizer.encode(options.initial_prompt)
-                if options.initial_prompt is not None
-                else []
-            ),
+            previous_tokens=[],
             without_timestamps=options.without_timestamps,
             hotwords=options.hotwords,
         )
+        initial_prompt_tokens = (
+            self._get_initial_prompt_tokens(tokenizer, options)
+            if prompt_for_first_chunk
+            else []
+        )
+        if initial_prompt_tokens:
+            first_prompt = self.model.get_prompt(
+                tokenizer,
+                previous_tokens=initial_prompt_tokens,
+                without_timestamps=options.without_timestamps,
+                hotwords=options.hotwords,
+            )
+            prompts = [first_prompt] + [
+                default_prompt.copy() for _ in range(batch_size - 1)
+            ]
+        else:
+            prompts = [default_prompt.copy() for _ in range(batch_size)]
 
+        max_prompt_length = max(len(prompt) for prompt in prompts)
         if options.max_new_tokens is not None:
-            max_length = len(prompt) + options.max_new_tokens
+            max_length = max_prompt_length + options.max_new_tokens
         else:
             max_length = self.model.max_length
 
         if max_length > self.model.max_length:
             raise ValueError(
-                f"The length of the prompt is {len(prompt)}, and the `max_new_tokens` "
-                f"{max_length - len(prompt)}. Thus, the combined length of the prompt "
-                f"and `max_new_tokens` is: {max_length}. This exceeds the "
-                f"`max_length` of the Whisper model: {self.model.max_length}. "
-                "You should either reduce the length of your prompt, or "
-                "reduce the value of `max_new_tokens`, "
-                f"so that their combined length is less that {self.model.max_length}."
+                f"The length of the prompt is {max_prompt_length}, and the "
+                f"`max_new_tokens` {max_length - max_prompt_length}. Thus, the "
+                f"combined length of the prompt and `max_new_tokens` is: "
+                f"{max_length}. This exceeds the `max_length` of the Whisper model: "
+                f"{self.model.max_length}. You should either reduce the length of "
+                "your prompt, or reduce the value of `max_new_tokens`, so that "
+                f"their combined length is less that {self.model.max_length}."
             )
 
         encoder_output = self.model.encode(features)
-        prompts = [prompt.copy() for _ in range(batch_size)]
 
         if options.multilingual:
             language_tokens = [
                 tokenizer.tokenizer.token_to_id(segment_langs[0][0])
                 for segment_langs in self.model.model.detect_language(encoder_output)
             ]
-            language_token_index = prompt.index(tokenizer.language)
 
-            for i, language_token in enumerate(language_tokens):
-                prompts[i][language_token_index] = language_token
+            for prompt, language_token in zip(prompts, language_tokens):
+                language_token_index = prompt.index(tokenizer.language)
+                prompt[language_token_index] = language_token
 
         results = self.model.model.generate(
             encoder_output,
@@ -250,6 +277,17 @@ class BatchedInferencePipeline:
             )
 
         return encoder_output, output
+
+    @staticmethod
+    def _get_initial_prompt_tokens(
+        tokenizer: Tokenizer,
+        options: TranscriptionOptions,
+    ) -> List[int]:
+        if options.initial_prompt is None:
+            return []
+        if isinstance(options.initial_prompt, str):
+            return tokenizer.encode(" " + options.initial_prompt.strip())
+        return list(options.initial_prompt)
 
     def transcribe(
         self,
@@ -588,6 +626,7 @@ class BatchedInferencePipeline:
                 tokenizer,
                 chunks_metadata[i : i + batch_size],
                 options,
+                prompt_for_first_chunk=i == 0,
             )
 
             for result in results:
