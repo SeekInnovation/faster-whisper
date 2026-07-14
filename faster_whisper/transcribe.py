@@ -1580,13 +1580,14 @@ class WhisperModel:
 
         if previous_tokens or (hotwords and not prefix):
             prompt.append(tokenizer.sot_prev)
+            context_budget = self.max_length // 2 - 1
             if hotwords and not prefix:
                 hotwords_tokens = tokenizer.encode(" " + hotwords.strip())
-                if len(hotwords_tokens) >= self.max_length // 2:
-                    hotwords_tokens = hotwords_tokens[: self.max_length // 2 - 1]
+                hotwords_tokens = hotwords_tokens[:context_budget]
                 prompt.extend(hotwords_tokens)
+                context_budget -= len(hotwords_tokens)
             if previous_tokens:
-                prompt.extend(previous_tokens[-(self.max_length // 2 - 1) :])
+                prompt.extend(previous_tokens[-context_budget:])
 
         prompt.extend(tokenizer.sot_sequence)
 
