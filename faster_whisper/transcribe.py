@@ -1586,7 +1586,7 @@ class WhisperModel:
                 hotwords_tokens = hotwords_tokens[:context_budget]
                 prompt.extend(hotwords_tokens)
                 context_budget -= len(hotwords_tokens)
-            if previous_tokens:
+            if previous_tokens and context_budget > 0:
                 prompt.extend(previous_tokens[-context_budget:])
 
         prompt.extend(tokenizer.sot_sequence)
